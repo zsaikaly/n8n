@@ -61,6 +61,12 @@ import { useToast } from '@/composables/useToast';
 import { useFoldersStore } from '@/stores/folders.store';
 import { useFolders } from '@/composables/useFolders';
 import { useUsageStore } from '@/stores/usage.store';
+import { useInsightsStore } from '@/features/insights/insights.store';
+import InsightsSummary from '@/features/insights/components/InsightsSummary.vue';
+import { useOverview } from '@/composables/useOverview';
+
+const SEARCH_DEBOUNCE_TIME = 300;
+const FILTERS_DEBOUNCE_TIME = 100;
 
 interface Filters extends BaseFilters {
 	status: string | boolean;
@@ -99,9 +105,11 @@ const uiStore = useUIStore();
 const tagsStore = useTagsStore();
 const foldersStore = useFoldersStore();
 const usageStore = useUsageStore();
+const insightsStore = useInsightsStore();
 
 const documentTitle = useDocumentTitle();
 const { callDebounced } = useDebounce();
+const overview = useOverview();
 
 const loading = ref(false);
 const breadcrumbsLoading = ref(false);
@@ -319,9 +327,14 @@ const hasFilters = computed(() => {
 	);
 });
 
-const isCommunity = computed(() => usageStore.planName.toLowerCase() === 'community');
+const isSelfHostedDeployment = computed(() => settingsStore.deploymentType === 'default');
+
 const canUserRegisterCommunityPlus = computed(
 	() => getResourcePermissions(usersStore.currentUser?.globalScopes).community.register,
+);
+
+const showRegisteredCommunityCTA = computed(
+	() => isSelfHostedDeployment.value && !foldersEnabled.value && canUserRegisterCommunityPlus.value,
 );
 
 /**
@@ -348,6 +361,13 @@ sourceControlStore.$onAction(({ name, after }) => {
 	after(async () => await initialize());
 });
 
+const onWorkflowDeleted = async () => {
+	await Promise.all([
+		fetchWorkflows(),
+		foldersStore.fetchTotalWorkflowsAndFoldersCount(route.params.projectId as string | undefined),
+	]);
+};
+
 const onFolderDeleted = async (payload: {
 	folderId: string;
 	workflowCount: number;
@@ -356,6 +376,9 @@ const onFolderDeleted = async (payload: {
 	const folderInfo = foldersStore.getCachedFolder(payload.folderId);
 	foldersStore.deleteFoldersFromCache([payload.folderId, folderInfo?.parentFolder ?? '']);
 	// If the deleted folder is the current folder, navigate to the parent folder
+	await foldersStore.fetchTotalWorkflowsAndFoldersCount(
+		route.params.projectId as string | undefined,
+	);
 
 	if (currentFolderId.value === payload.folderId) {
 		void router.push({
@@ -410,6 +433,7 @@ const initialize = async () => {
 		fetchWorkflows(),
 		workflowsStore.fetchActiveWorkflows(),
 		usageStore.getLicenseInfo(),
+		foldersStore.fetchTotalWorkflowsAndFoldersCount(route.params.projectId as string | undefined),
 	]);
 	breadcrumbsLoading.value = false;
 	workflowsAndFolders.value = resourcesPage;
@@ -428,6 +452,7 @@ const fetchWorkflows = async () => {
 	const delayedLoading = debounce(() => {
 		loading.value = true;
 	}, 300);
+
 	const routeProjectId = route.params?.projectId as string | undefined;
 	const homeProjectFilter = filters.value.homeProject || undefined;
 	const parentFolder = (route.params?.folderId as string) || undefined;
@@ -473,8 +498,6 @@ const fetchWorkflows = async () => {
 			breadcrumbsLoading.value = false;
 		}
 
-		await foldersStore.fetchTotalWorkflowsAndFoldersCount(routeProjectId);
-
 		workflowsAndFolders.value = fetchedResources;
 		return fetchedResources;
 	} catch (error) {
@@ -507,14 +530,14 @@ const onSortUpdated = async (sort: string) => {
 const onFiltersUpdated = async () => {
 	currentPage.value = 1;
 	saveFiltersOnQueryString();
-	await callDebounced(fetchWorkflows, { debounceTime: 100, trailing: true });
+	await callDebounced(fetchWorkflows, { debounceTime: FILTERS_DEBOUNCE_TIME, trailing: true });
 };
 
 const onSearchUpdated = async (search: string) => {
 	currentPage.value = 1;
 	saveFiltersOnQueryString();
 	if (search) {
-		await callDebounced(fetchWorkflows, { debounceTime: 100, trailing: true });
+		await callDebounced(fetchWorkflows, { debounceTime: SEARCH_DEBOUNCE_TIME, trailing: true });
 	} else {
 		// No need to debounce when clearing search
 		await fetchWorkflows();
@@ -523,12 +546,12 @@ const onSearchUpdated = async (search: string) => {
 
 const setCurrentPage = async (page: number) => {
 	currentPage.value = page;
-	await callDebounced(fetchWorkflows, { debounceTime: 100, trailing: true });
+	await callDebounced(fetchWorkflows, { debounceTime: FILTERS_DEBOUNCE_TIME, trailing: true });
 };
 
 const setPageSize = async (size: number) => {
 	pageSize.value = size;
-	await callDebounced(fetchWorkflows, { debounceTime: 100, trailing: true });
+	await callDebounced(fetchWorkflows, { debounceTime: FILTERS_DEBOUNCE_TIME, trailing: true });
 };
 
 const onClickTag = async (tagId: string) => {
@@ -1024,8 +1047,8 @@ const renameFolder = async (folderId: string) => {
 };
 
 const createFolderInCurrent = async () => {
-	// Show the community plus enrollment modal if the user is in a community plan
-	if (isCommunity.value && canUserRegisterCommunityPlus.value) {
+	// Show the community plus enrollment modal if the user is self-hosted, and hasn't enabled folders
+	if (showRegisteredCommunityCTA.value) {
 		uiStore.openModalWithData({
 			name: COMMUNITY_PLUS_ENROLLMENT_MODAL,
 			data: { customHeading: i18n.baseText('folders.registeredCommunity.cta.heading') },
@@ -1107,7 +1130,7 @@ const moveWorkflowToFolder = async (payload: {
 	name: string;
 	parentFolderId?: string;
 }) => {
-	if (isCommunity.value && canUserRegisterCommunityPlus.value) {
+	if (showRegisteredCommunityCTA.value) {
 		uiStore.openModalWithData({
 			name: COMMUNITY_PLUS_ENROLLMENT_MODAL,
 			data: { customHeading: i18n.baseText('folders.registeredCommunity.cta.heading') },
@@ -1200,15 +1223,21 @@ const onCreateWorkflowClick = () => {
 		@sort="onSortUpdated"
 	>
 		<template #header>
-			<ProjectHeader @create-folder="createFolderInCurrent" />
+			<ProjectHeader @create-folder="createFolderInCurrent">
+				<InsightsSummary
+					v-if="overview.isOverviewSubPage && insightsStore.isSummaryEnabled"
+					:loading="insightsStore.summary.isLoading"
+					:summary="insightsStore.summary.state"
+				/>
+			</ProjectHeader>
 		</template>
-		<template v-if="foldersEnabled" #add-button>
+		<template v-if="foldersEnabled || showRegisteredCommunityCTA" #add-button>
 			<N8nTooltip
 				placement="top"
 				:disabled="!(isOverviewPage || (!readOnlyEnv && hasPermissionToCreateFolders))"
 			>
 				<template #content>
-					<span v-if="isOverviewPage">
+					<span v-if="isOverviewPage && !showRegisteredCommunityCTA">
 						<span v-if="teamProjectsEnabled">
 							{{ i18n.baseText('folders.add.overview.withProjects.message') }}
 						</span>
@@ -1216,7 +1245,7 @@ const onCreateWorkflowClick = () => {
 							{{ i18n.baseText('folders.add.overview.community.message') }}
 						</span>
 					</span>
-					<span v-else-if="!readOnlyEnv && hasPermissionToCreateFolders">
+					<span v-else>
 						{{
 							currentParentName
 								? i18n.baseText('folders.add.to.parent.message', {
@@ -1232,7 +1261,7 @@ const onCreateWorkflowClick = () => {
 					type="tertiary"
 					data-test-id="add-folder-button"
 					:class="$style['add-folder-button']"
-					:disabled="readOnlyEnv || !hasPermissionToCreateFolders"
+					:disabled="!showRegisteredCommunityCTA && (readOnlyEnv || !hasPermissionToCreateFolders)"
 					@click="createFolderInCurrent"
 				/>
 			</N8nTooltip>
@@ -1283,24 +1312,27 @@ const onCreateWorkflowClick = () => {
 				/>
 			</div>
 		</template>
-		<template #item="{ item: data }">
+		<template #item="{ item: data, index }">
 			<FolderCard
 				v-if="(data as FolderResource | WorkflowResource).resourceType === 'folder'"
+				:key="`folder-${index}`"
 				:data="data as FolderResource"
 				:actions="folderCardActions"
 				:read-only="readOnlyEnv || (!hasPermissionToDeleteFolders && !hasPermissionToCreateFolders)"
+				:personal-project="projectsStore.personalProject"
 				class="mb-2xs"
 				@action="onFolderCardAction"
 			/>
 			<WorkflowCard
 				v-else
+				:key="`workflow-${index}`"
 				data-test-id="resources-list-item-workflow"
 				class="mb-2xs"
 				:data="data as WorkflowResource"
 				:workflow-list-event-bus="workflowListEventBus"
 				:read-only="readOnlyEnv"
 				@click:tag="onClickTag"
-				@workflow:deleted="fetchWorkflows"
+				@workflow:deleted="onWorkflowDeleted"
 				@workflow:moved="fetchWorkflows"
 				@workflow:duplicated="fetchWorkflows"
 				@workflow:active-toggle="onWorkflowActiveToggle"
