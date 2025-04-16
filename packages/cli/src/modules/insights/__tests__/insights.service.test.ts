@@ -544,6 +544,29 @@ describe('workflowExecuteAfterHandler - flushEvents', () => {
 		}
 	});
 
+	test('reschedule flush on no buffered insights', async () => {
+		// ARRANGE
+		jest.useFakeTimers();
+		trxMock.insert.mockClear();
+		insightsService.startBackgroundProcess();
+		const flushEventsSpy = jest.spyOn(insightsService, 'flushEvents');
+
+		try {
+			// ACT
+			await jest.advanceTimersByTimeAsync(31 * 1000);
+
+			// ASSERT
+			expect(flushEventsSpy).toHaveBeenCalledTimes(1);
+			expect(trxMock.insert).not.toHaveBeenCalled();
+
+			// ACT
+			await jest.advanceTimersByTimeAsync(31 * 1000);
+			expect(flushEventsSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			jest.useRealTimers();
+		}
+	});
+
 	test('flushes events to the database on shutdown', async () => {
 		// ARRANGE
 		trxMock.insert.mockClear();
@@ -1280,10 +1303,10 @@ describe('getInsightsSummary', () => {
 
 		// ASSERT
 		expect(summary).toEqual({
-			averageRunTime: { deviation: -123, unit: 'time', value: 0 },
+			averageRunTime: { deviation: -123, unit: 'millisecond', value: 0 },
 			failed: { deviation: 1, unit: 'count', value: 1 },
 			failureRate: { deviation: 0.333, unit: 'ratio', value: 0.333 },
-			timeSaved: { deviation: 0, unit: 'time', value: 0 },
+			timeSaved: { deviation: 0, unit: 'minute', value: 0 },
 			total: { deviation: 2, unit: 'count', value: 3 },
 		});
 	});
@@ -1343,10 +1366,10 @@ describe('getInsightsSummary', () => {
 
 		// ASSERT
 		expect(summary).toEqual({
-			averageRunTime: { deviation: 0, unit: 'time', value: 0 },
+			averageRunTime: { deviation: 0, unit: 'millisecond', value: 0 },
 			failed: { deviation: 2, unit: 'count', value: 2 },
 			failureRate: { deviation: 0.5, unit: 'ratio', value: 0.5 },
-			timeSaved: { deviation: 0, unit: 'time', value: 0 },
+			timeSaved: { deviation: 0, unit: 'minute', value: 0 },
 			total: { deviation: -1, unit: 'count', value: 4 },
 		});
 	});
